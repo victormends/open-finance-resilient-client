@@ -16,11 +16,9 @@ from fastapi.responses import JSONResponse
 
 from backend.app.client import (
     DEFAULT_TIMEOUT,
+    JitterFn,
     SleepFn,
-    close_client,
-    configure_client_factory,
-    get_client,
-    init_client,
+    set_client,
 )
 from backend.app.routes import client_router, get_request_id, sandbox_router
 from backend.app.sandbox import SandboxAPIError
@@ -33,14 +31,20 @@ logging.basicConfig(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Initialize shared async HTTP client on startup and close it cleanly on shutdown."""
-    init_client(force=True)
+    """Initialize app-scoped shared async HTTP client on startup and close it on shutdown."""
+    factory = getattr(app.state, "client_factory", None)
+    client: Optional[httpx.AsyncClient] = factory() if factory is not None else None
+    app.state.http_client = client
+    if client is not None:
+        set_client(client)
     app.state.ready = True
     try:
         yield
     finally:
         app.state.ready = False
-        await close_client()
+        app.state.http_client = None
+        if client is not None and not client.is_closed:
+            await client.aclose()
 
 
 def create_app(
@@ -49,6 +53,8 @@ def create_app(
     retry_factor: Optional[float] = None,
     max_retries: Optional[int] = None,
     sleep_fn: Optional[SleepFn] = None,
+    respect_retry_after: bool = True,
+    jitter_fn: Optional[JitterFn] = None,
 ) -> FastAPI:
     """Construct and configure the FastAPI application."""
     app = FastAPI(
@@ -80,22 +86,21 @@ def create_app(
         else int(os.getenv("OPEN_FINANCE_MAX_RETRIES", "4"))
     )
     app.state.sleep_fn = sleep_fn
-    app.state.ready = True
+    app.state.respect_retry_after = respect_retry_after
+    app.state.jitter_fn = jitter_fn
+    app.state.ready = False
+    app.state.http_client = None
 
     if resolved_base_url == "inprocess://sandbox":
-        configure_client_factory(
-            lambda: httpx.AsyncClient(
-                base_url="http://sandbox.local",
-                transport=httpx.ASGITransport(app=app),
-                timeout=resolved_timeout,
-            )
+        app.state.client_factory = lambda: httpx.AsyncClient(
+            base_url="http://sandbox.local",
+            transport=httpx.ASGITransport(app=app),
+            timeout=resolved_timeout,
         )
     else:
-        configure_client_factory(
-            lambda: httpx.AsyncClient(
-                base_url=resolved_base_url,
-                timeout=resolved_timeout,
-            )
+        app.state.client_factory = lambda: httpx.AsyncClient(
+            base_url=resolved_base_url,
+            timeout=resolved_timeout,
         )
 
     @app.middleware("http")
@@ -149,8 +154,8 @@ def create_app(
                 status_code=503,
                 content={"status": "not_ready", "http_client": "closed"},
             )
-        client = get_client()
-        if client.is_closed:
+        client = getattr(app.state, "http_client", None)
+        if client is None or client.is_closed:
             return JSONResponse(
                 status_code=503,
                 content={"status": "not_ready", "http_client": "closed"},

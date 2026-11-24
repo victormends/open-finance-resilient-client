@@ -309,3 +309,47 @@ async def test_module_level_wrappers_use_shared_client_with_sleeper() -> None:
     assert direct.status_code == 201
     assert attempts == 3
     assert sleeps == [2.0]
+
+
+@pytest.mark.asyncio
+async def test_retry_after_header_and_jitter_fn_applied_deterministically() -> None:
+    attempts = 0
+    sleeps: List[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "5"},
+                json={"code": "too_many_sessions", "request_id": "req-ra-1"},
+            )
+        if attempts == 2:
+            return httpx.Response(
+                503,
+                headers={"Retry-After": "120"},  # capped at max_retry_after_seconds=10
+                json={"code": "upstream_busy", "request_id": "req-ra-2"},
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://sandbox.example",
+    ) as http_client:
+        client = ResilientOpenFinanceClient(
+            client=http_client,
+            base=1.0,
+            factor=2.0,
+            max_retries=3,
+            sleep_fn=_make_recorder_sleeper(sleeps),
+            respect_retry_after=True,
+            max_retry_after_seconds=10.0,
+            jitter_fn=lambda d: d + 0.25,
+        )
+        response = await client.post("/api/v1/accounts", json={"link": "link-1"})
+
+    assert response.status_code == 200
+    assert attempts == 3
+    assert sleeps == [5.25, 10.25]
+

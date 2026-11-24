@@ -12,6 +12,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 SleepFn = Callable[[float], Awaitable[None]]
+JitterFn = Callable[[float], float]
 ClientFactory = Callable[[], httpx.AsyncClient]
 
 DEFAULT_BASE_URL = "http://localhost:8000"
@@ -19,6 +20,7 @@ DEFAULT_TIMEOUT = 30.0
 DEFAULT_BASE_DELAY = 3.0
 DEFAULT_BACKOFF_FACTOR = 2.0
 DEFAULT_MAX_RETRIES = 5
+DEFAULT_MAX_RETRY_AFTER_SECONDS = 60.0
 
 _client: Optional[httpx.AsyncClient] = None
 _client_factory: Optional[ClientFactory] = None
@@ -134,6 +136,23 @@ def extract_error_codes(response: httpx.Response) -> List[str]:
     return codes
 
 
+def parse_retry_after_seconds(
+    response: httpx.Response,
+    max_seconds: float = DEFAULT_MAX_RETRY_AFTER_SECONDS,
+) -> Optional[float]:
+    """Parse numeric Retry-After header seconds bounded cleanly to ``[0, max_seconds]``."""
+    raw = response.headers.get("Retry-After") or response.headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        parsed = float(str(raw).strip())
+    except ValueError:
+        return None
+    if parsed < 0:
+        return None
+    return min(parsed, float(max_seconds))
+
+
 def should_retry(response: httpx.Response) -> bool:
     """Retry on 5xx responses, and on 4xx ONLY when code == 'too_many_sessions'."""
     if response.status_code >= 500:
@@ -177,6 +196,9 @@ class ResilientOpenFinanceClient:
         factor: float = DEFAULT_BACKOFF_FACTOR,
         max_retries: int = DEFAULT_MAX_RETRIES,
         sleep_fn: Optional[SleepFn] = None,
+        respect_retry_after: bool = True,
+        max_retry_after_seconds: float = DEFAULT_MAX_RETRY_AFTER_SECONDS,
+        jitter_fn: Optional[JitterFn] = None,
     ) -> None:
         if base < 0:
             raise ValueError("base must be >= 0")
@@ -184,11 +206,28 @@ class ResilientOpenFinanceClient:
             raise ValueError("factor must be > 0")
         if max_retries < 0:
             raise ValueError("max_retries must be >= 0")
+        if max_retry_after_seconds < 0:
+            raise ValueError("max_retry_after_seconds must be >= 0")
         self._client = client
         self.base = base
         self.factor = factor
         self.max_retries = max_retries
         self.sleep_fn: SleepFn = sleep_fn if sleep_fn is not None else asyncio.sleep
+        self.respect_retry_after = respect_retry_after
+        self.max_retry_after_seconds = float(max_retry_after_seconds)
+        self.jitter_fn = jitter_fn
+
+    def _compute_delay(self, attempt: int, response: Optional[httpx.Response] = None) -> float:
+        delay = self.base * (self.factor ** attempt)
+        if response is not None and self.respect_retry_after:
+            retry_after = parse_retry_after_seconds(
+                response, max_seconds=self.max_retry_after_seconds
+            )
+            if retry_after is not None:
+                delay = max(delay, retry_after)
+        if self.jitter_fn is not None:
+            delay = max(0.0, float(self.jitter_fn(delay)))
+        return delay
 
     def _active_client(self) -> httpx.AsyncClient:
         return self._client if self._client is not None else get_client()
@@ -212,7 +251,7 @@ class ResilientOpenFinanceClient:
                 )
                 if attempt == self.max_retries:
                     raise
-                delay = self.base * (self.factor ** attempt)
+                delay = self._compute_delay(attempt)
                 await self.sleep_fn(delay)
                 continue
 
@@ -220,7 +259,7 @@ class ResilientOpenFinanceClient:
                 log_non_2xx(response)
 
             if should_retry(response) and attempt < self.max_retries:
-                delay = self.base * (self.factor ** attempt)
+                delay = self._compute_delay(attempt, response=response)
                 logger.warning(
                     "Retrying Open Finance request in %.3fs (attempt %d/%d, status=%s, path=%s)",
                     delay,
@@ -278,6 +317,9 @@ async def request_with_retry(
     factor: float = DEFAULT_BACKOFF_FACTOR,
     max_retries: int = DEFAULT_MAX_RETRIES,
     sleep_fn: Optional[SleepFn] = None,
+    respect_retry_after: bool = True,
+    max_retry_after_seconds: float = DEFAULT_MAX_RETRY_AFTER_SECONDS,
+    jitter_fn: Optional[JitterFn] = None,
     **kwargs: Any,
 ) -> httpx.Response:
     """Execute an Open Finance request using the shared or provided AsyncClient."""
@@ -287,6 +329,9 @@ async def request_with_retry(
         factor=factor,
         max_retries=max_retries,
         sleep_fn=sleep_fn,
+        respect_retry_after=respect_retry_after,
+        max_retry_after_seconds=max_retry_after_seconds,
+        jitter_fn=jitter_fn,
     )
     return await resilient.request(method, path, **kwargs)
 

@@ -35,13 +35,16 @@ def get_request_id(request: Request) -> str:
 
 
 def get_resilient_client(request: Request) -> ResilientOpenFinanceClient:
-    """Build a ResilientOpenFinanceClient using app-configured retry policy and shared AsyncClient."""
+    """Build a ResilientOpenFinanceClient using app-scoped AsyncClient and retry policy."""
+    http_client = getattr(request.app.state, "http_client", None) or get_client()
     return ResilientOpenFinanceClient(
-        client=get_client(),
+        client=http_client,
         base=getattr(request.app.state, "retry_base", 0.5),
         factor=getattr(request.app.state, "retry_factor", 2.0),
         max_retries=getattr(request.app.state, "max_retries", 4),
         sleep_fn=getattr(request.app.state, "sleep_fn", None),
+        respect_retry_after=getattr(request.app.state, "respect_retry_after", True),
+        jitter_fn=getattr(request.app.state, "jitter_fn", None),
     )
 
 

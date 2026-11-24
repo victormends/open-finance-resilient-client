@@ -22,6 +22,12 @@ def _clean_sandbox() -> Iterator[None]:
 
 def test_health_ready_and_lifespan_client_shutdown() -> None:
     app = create_app(retry_base=0.0, retry_factor=2.0, max_retries=3)
+    # Before FastAPI lifespan runs, readiness probe must fail closed with 503.
+    bare_client = TestClient(app)
+    pre_ready = bare_client.get("/ready")
+    assert pre_ready.status_code == 503
+    assert pre_ready.json()["status"] == "not_ready"
+
     with TestClient(app) as client:
         health = client.get("/health")
         assert health.status_code == 200
@@ -36,6 +42,17 @@ def test_health_ready_and_lifespan_client_shutdown() -> None:
         assert not shared_http.is_closed
 
     assert shared_http.is_closed
+
+
+def test_multiple_app_instances_keep_isolated_http_clients() -> None:
+    app1 = create_app(retry_base=0.0)
+    app2 = create_app(retry_base=0.5)
+    with TestClient(app1) as c1, TestClient(app2) as c2:
+        assert app1.state.http_client is not None
+        assert app2.state.http_client is not None
+        assert app1.state.http_client is not app2.state.http_client
+        assert c1.get("/ready").status_code == 200
+        assert c2.get("/ready").status_code == 200
 
 
 def test_request_id_propagation_on_success_and_error() -> None:

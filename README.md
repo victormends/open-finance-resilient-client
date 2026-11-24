@@ -33,10 +33,10 @@ FastAPI Entrypoint (backend/app/main.py)
 
 ## Core Engineering Guarantees
 
-1. **Lifespan-Managed Shared `httpx.AsyncClient`**
-   `get_client()` and `close_client()` manage a single pooled async HTTP client initialized on FastAPI startup and gracefully closed on shutdown. No per-request socket churn or leaked connection pools.
-2. **Selective Exponential Backoff (`base`, `factor`, `max_retries`, `sleep_fn`)**
-   - **Retried:** Transport errors (`httpx.RequestError`), all `5xx` responses, and `4xx` responses **exclusively** when the structured error payload carries `code == "too_many_sessions"`.
+1. **App-Scoped Lifespan-Managed `httpx.AsyncClient`**
+   FastAPI's `lifespan` initializes an isolated per-app async connection pool on startup (flipping `/ready` from `503 not_ready` to `200 ready`) and closes it cleanly on shutdown without per-request socket churn or cross-app state clobbering.
+2. **Selective Exponential Backoff, `Retry-After` & Optional Jitter (`base`, `factor`, `max_retries`, `sleep_fn`, `jitter_fn`)**
+   - **Retried:** Transport errors (`httpx.RequestError`), all `5xx` responses, and `4xx` responses **exclusively** when the structured error payload carries `code == "too_many_sessions"`. Honors numeric `Retry-After` headers (bounded by `max_retry_after_seconds`) and optional caller-injected `jitter_fn`.
    - **Never retried:** `400`, `404`, `409`, `422`, `423`, `428`, or generic `429` (`rate_limit_exceeded`).
    - **Deterministic testing:** Injectable async `sleep_fn` allows tests to assert exact backoff schedules (`base * factor^attempt`) in zero wall-clock time.
 3. **End-to-End `request_id` Observability**
@@ -76,7 +76,7 @@ python -m venv .venv
 # Linux/macOS: source .venv/bin/activate
 # Windows PowerShell: .venv\Scripts\Activate.ps1
 
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 uvicorn backend.app.main:app --reload
 ```
 
@@ -86,7 +86,7 @@ uvicorn backend.app.main:app --reload
 pytest -v
 ```
 
-### Docker Compose
+### Docker Compose (Non-Root Container)
 
 ```bash
 docker compose up --build
