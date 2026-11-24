@@ -1,0 +1,20 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      OPEN_FINANCE_BASE_URL: "inprocess://sandbox"
+      OPEN_FINANCE_TIMEOUT: "30.0"
+      OPEN_FINANCE_RETRY_BASE: "0.5"
+      OPEN_FINANCE_RETRY_FACTOR: "2.0"
+      OPEN_FINANCE_MAX_RETRIES: "4"
+      LOG_LEVEL: "INFO"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
