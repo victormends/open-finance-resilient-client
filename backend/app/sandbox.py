@@ -14,8 +14,8 @@ DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SUPPORTED_FAULTS: Set[str] = {
     "503",
     "503-once",
-    "too_many_sessions",
-    "too_many_sessions-once",
+    "concurrent_session_limit",
+    "concurrent_session_limit-once",
     "423",
     "423-once",
     "429",
@@ -42,14 +42,14 @@ class SandboxAPIError(Exception):
         self.extra: Dict[str, Any] = extra or {}
 
 
-class LinkCreateRequest(BaseModel):
+class ConnectionCreateRequest(BaseModel):
     institution: str = Field(..., description="Target financial institution slug.")
     username: Optional[str] = Field(default=None, description="Optional synthetic user identifier.")
     access_mode: str = Field(default="single", description="Consent mode: single or recurrent.")
 
 
 class ResourceFetchRequest(BaseModel):
-    link: str = Field(..., description="Registered link identifier.")
+    connection: str = Field(..., description="Registered connection identifier.")
     save_data: bool = Field(default=True, description="Whether to persist retrieved records.")
     require_mfa: Optional[bool] = Field(
         default=None,
@@ -68,7 +68,7 @@ class TransactionsFetchRequest(ResourceFetchRequest):
 
 class MfaResumeRequest(BaseModel):
     session: str = Field(..., description="Pending MFA session UUID from HTTP 428.")
-    link: str = Field(..., description="Link identifier bound to the MFA session.")
+    connection: str = Field(..., description="Connection identifier bound to the MFA session.")
     token: str = Field(..., description="User-supplied MFA token or approval confirmation.")
     resource: Optional[str] = Field(
         default=None,
@@ -77,7 +77,10 @@ class MfaResumeRequest(BaseModel):
 
 
 class FaultArmRequest(BaseModel):
-    fault: str = Field(..., description="Fault profile: 503-once, too_many_sessions-once, 423, etc.")
+    fault: str = Field(
+        ...,
+        description="Fault profile: 503-once, concurrent_session_limit-once, 423, etc.",
+    )
     count: Optional[int] = Field(
         default=None,
         description="Number of occurrences before auto-clearing; defaults to 1 for *-once else persistent.",
@@ -88,7 +91,7 @@ class OpenFinanceSandbox:
     """In-process Open Finance provider simulator with strict MFA session binding."""
 
     def __init__(self) -> None:
-        self.links: Dict[str, Dict[str, Any]] = {}
+        self.connections: Dict[str, Dict[str, Any]] = {}
         self.sessions: Dict[str, Dict[str, Any]] = {}
         self.accounts: Dict[str, List[Dict[str, Any]]] = {}
         self.owners: Dict[str, List[Dict[str, Any]]] = {}
@@ -97,8 +100,8 @@ class OpenFinanceSandbox:
         self.consumed_header_faults: Set[Tuple[str, str]] = set()
 
     def reset(self) -> None:
-        """Clear all links, MFA sessions, stored records, and fault injection state."""
-        self.links.clear()
+        """Clear all connections, MFA sessions, stored records, and fault injection state."""
+        self.connections.clear()
         self.sessions.clear()
         self.accounts.clear()
         self.owners.clear()
@@ -142,17 +145,17 @@ class OpenFinanceSandbox:
                 code="upstream_unavailable",
                 message="Simulated upstream institution service interruption. Retry with backoff.",
             )
-        if base_fault == "too_many_sessions":
+        if base_fault == "concurrent_session_limit":
             raise SandboxAPIError(
                 status_code=429,
-                code="too_many_sessions",
+                code="concurrent_session_limit",
                 message="Too many concurrent institution sessions active. Safe to retry with backoff.",
             )
         if base_fault == "423":
             raise SandboxAPIError(
                 status_code=423,
                 code="operational_limits_reached",
-                message="Operational retrieval quota reached for this link.",
+                message="Operational retrieval quota reached for this connection.",
                 extra={"public_error_code": "operational_limits_reached"},
             )
         if base_fault == "429":
@@ -201,13 +204,13 @@ class OpenFinanceSandbox:
                 self.consumed_header_faults.add(latch_key)
             self._raise_fault_error(normalized)
 
-    def create_link(
+    def create_connection(
         self,
         institution: str,
         username: Optional[str] = None,
         access_mode: str = "single",
     ) -> Dict[str, Any]:
-        """Register a new synthetic financial institution link."""
+        """Register a new synthetic financial institution connection."""
         clean_institution = institution.strip()
         if not clean_institution:
             raise SandboxAPIError(
@@ -222,42 +225,42 @@ class OpenFinanceSandbox:
                 message="access_mode must be either 'single' or 'recurrent'.",
             )
 
-        link_id = f"link-{uuid.uuid4().hex[:12]}"
+        connection_id = f"conn-{uuid.uuid4().hex[:12]}"
         record = {
-            "id": link_id,
+            "id": connection_id,
             "institution": clean_institution,
             "username": username or "sandbox_user",
             "access_mode": access_mode,
             "status": "valid",
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
-        self.links[link_id] = record
+        self.connections[connection_id] = record
         return dict(record)
 
-    def require_link(self, link_id: str) -> Dict[str, Any]:
-        """Ensure link exists and return its record, or raise HTTP 404."""
-        record = self.links.get(link_id)
+    def require_connection(self, connection_id: str) -> Dict[str, Any]:
+        """Ensure connection exists and return its record, or raise HTTP 404."""
+        record = self.connections.get(connection_id)
         if record is None:
             raise SandboxAPIError(
                 status_code=404,
-                code="link_not_found",
-                message=f"Link '{link_id}' does not exist.",
+                code="connection_not_found",
+                message=f"Connection '{connection_id}' does not exist.",
             )
         return dict(record)
 
-    def delete_link(self, link_id: str) -> None:
-        """Delete a link along with stored resource caches and pending MFA sessions."""
-        if link_id not in self.links:
+    def delete_connection(self, connection_id: str) -> None:
+        """Delete a connection along with stored resource caches and pending MFA sessions."""
+        if connection_id not in self.connections:
             raise SandboxAPIError(
                 status_code=404,
-                code="link_not_found",
-                message=f"Link '{link_id}' does not exist.",
+                code="connection_not_found",
+                message=f"Connection '{connection_id}' does not exist.",
             )
-        del self.links[link_id]
-        self.accounts.pop(link_id, None)
-        self.owners.pop(link_id, None)
-        self.transactions.pop(link_id, None)
-        for session_id in [k for k, v in self.sessions.items() if v["link"] == link_id]:
+        del self.connections[connection_id]
+        self.accounts.pop(connection_id, None)
+        self.owners.pop(connection_id, None)
+        self.transactions.pop(connection_id, None)
+        for session_id in [k for k, v in self.sessions.items() if v["connection"] == connection_id]:
             del self.sessions[session_id]
 
     @staticmethod
@@ -290,25 +293,25 @@ class OpenFinanceSandbox:
     def create_mfa_challenge(
         self,
         resource: str,
-        link: str,
+        connection: str,
         challenge_type: str = "otp_token",
         context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Issue or reuse an unconsumed MFA challenge bound strictly to (link, resource)."""
+        """Issue or reuse an unconsumed MFA challenge bound strictly to (connection, resource)."""
         resolved_context = dict(context or {})
         for session_id, pending in self.sessions.items():
             if (
                 pending["resource"] == resource
-                and pending["link"] == link
+                and pending["connection"] == connection
                 and pending["challenge_type"] == challenge_type
                 and pending["context"] == resolved_context
                 and not pending["used"]
             ):
                 return {
-                    "code": "token_required",
+                    "code": "mfa_challenge_required",
                     "message": f"Multi-factor authentication required before retrieving {resource}.",
                     "session": session_id,
-                    "link": link,
+                    "connection": connection,
                     "resource": resource,
                     "challenge_type": challenge_type,
                 }
@@ -317,26 +320,26 @@ class OpenFinanceSandbox:
         self.sessions[session_id] = {
             "session": session_id,
             "resource": resource,
-            "link": link,
+            "connection": connection,
             "challenge_type": challenge_type,
             "used": False,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "context": resolved_context,
         }
         return {
-            "code": "token_required",
+            "code": "mfa_challenge_required",
             "message": f"Multi-factor authentication required before retrieving {resource}.",
             "session": session_id,
-            "link": link,
+            "connection": connection,
             "resource": resource,
             "challenge_type": challenge_type,
         }
 
-    def generate_accounts(self, link: str, save_data: bool = True) -> List[Dict[str, Any]]:
+    def generate_accounts(self, connection: str, save_data: bool = True) -> List[Dict[str, Any]]:
         records = [
             {
-                "id": f"{link}-acct-001",
-                "link": link,
+                "id": f"{connection}-acct-001",
+                "connection": connection,
                 "name": "Checking Account Sandbox",
                 "category": "CHECKING_ACCOUNT",
                 "currency": "BRL",
@@ -344,8 +347,8 @@ class OpenFinanceSandbox:
                 "last_accessed_at": datetime.now(timezone.utc).isoformat(),
             },
             {
-                "id": f"{link}-acct-002",
-                "link": link,
+                "id": f"{connection}-acct-002",
+                "connection": connection,
                 "name": "Savings Reserve Sandbox",
                 "category": "SAVINGS_ACCOUNT",
                 "currency": "BRL",
@@ -354,14 +357,14 @@ class OpenFinanceSandbox:
             },
         ]
         if save_data:
-            self.accounts[link] = records
+            self.accounts[connection] = records
         return records
 
-    def generate_owners(self, link: str, save_data: bool = True) -> List[Dict[str, Any]]:
+    def generate_owners(self, connection: str, save_data: bool = True) -> List[Dict[str, Any]]:
         records = [
             {
-                "id": f"{link}-owner-001",
-                "link": link,
+                "id": f"{connection}-owner-001",
+                "connection": connection,
                 "display_name": "Alex Rivera",
                 "email": "alex.rivera@sandbox.example",
                 "phone_number": "+55 11 90000-0101",
@@ -370,12 +373,12 @@ class OpenFinanceSandbox:
             }
         ]
         if save_data:
-            self.owners[link] = records
+            self.owners[connection] = records
         return records
 
     def generate_transactions(
         self,
-        link: str,
+        connection: str,
         date_from: str,
         date_to: str,
         save_data: bool = True,
@@ -391,8 +394,8 @@ class OpenFinanceSandbox:
         ]
         all_rows = [
             {
-                "id": f"{link}-tx-{idx}",
-                "link": link,
+                "id": f"{connection}-tx-{idx}",
+                "connection": connection,
                 "value_date": str(today - timedelta(days=days_ago)),
                 "description": description,
                 "amount": amount,
@@ -410,18 +413,18 @@ class OpenFinanceSandbox:
             if start <= date.fromisoformat(row["value_date"]) <= end
         ]
         if save_data:
-            self.transactions[link] = filtered
+            self.transactions[connection] = filtered
         return filtered
 
     def filter_stored_transactions(
         self,
-        link: str,
+        connection: str,
         date_from: str,
         date_to: str,
     ) -> List[Dict[str, Any]]:
-        self.require_link(link)
+        self.require_connection(connection)
         start, end = self.parse_date_range(date_from, date_to)
-        stored = self.transactions.get(link, [])
+        stored = self.transactions.get(connection, [])
         return [
             row
             for row in stored
@@ -431,11 +434,11 @@ class OpenFinanceSandbox:
     def resume_mfa(
         self,
         session: str,
-        link: str,
+        connection: str,
         token: str,
         resource: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Validate session/link/resource binding, prevent replay, and return materialized data."""
+        """Validate session/connection/resource binding, prevent replay, and return materialized data."""
         if not token.strip():
             raise SandboxAPIError(
                 status_code=422,
@@ -451,12 +454,12 @@ class OpenFinanceSandbox:
                 message=f"Unknown MFA session '{session}'.",
             )
 
-        if pending["link"] != link:
+        if pending["connection"] != connection:
             raise SandboxAPIError(
                 status_code=409,
-                code="session_link_mismatch",
-                message="MFA session does not belong to the specified link.",
-                extra={"expected_link": pending["link"], "received_link": link},
+                code="session_connection_mismatch",
+                message="MFA session does not belong to the specified connection.",
+                extra={"expected_connection": pending["connection"], "received_connection": connection},
             )
 
         if resource is not None and pending["resource"] != resource:
@@ -474,7 +477,7 @@ class OpenFinanceSandbox:
                 message="MFA session has already been consumed and cannot be replayed.",
             )
 
-        self.require_link(link)
+        self.require_connection(connection)
         pending["used"] = True
 
         target_resource = pending["resource"]
@@ -482,12 +485,12 @@ class OpenFinanceSandbox:
         save_data = bool(ctx.get("save_data", True))
 
         if target_resource == "accounts":
-            data = self.generate_accounts(link, save_data=save_data)
+            data = self.generate_accounts(connection, save_data=save_data)
         elif target_resource == "owners":
-            data = self.generate_owners(link, save_data=save_data)
+            data = self.generate_owners(connection, save_data=save_data)
         elif target_resource == "transactions":
             data = self.generate_transactions(
-                link=link,
+                connection=connection,
                 date_from=ctx["date_from"],
                 date_to=ctx["date_to"],
                 save_data=save_data,
@@ -502,7 +505,7 @@ class OpenFinanceSandbox:
         return {
             "status": "completed",
             "session": session,
-            "link": link,
+            "connection": connection,
             "resource": target_resource,
             "challenge_type": pending["challenge_type"],
             "data": data,

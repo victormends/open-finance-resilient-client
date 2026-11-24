@@ -53,7 +53,7 @@ async def test_5xx_exponential_backoff_and_recovery(caplog: pytest.LogCaptureFix
             max_retries=4,
             sleep_fn=_make_recorder_sleeper(sleeps),
         )
-        response = await client.post("/api/v1/owners", json={"link": "link-1"})
+        response = await client.post("/api/v1/owners", json={"connection": "conn-1"})
 
     assert response.status_code == 200
     assert response.json() == {"ok": True}
@@ -99,7 +99,7 @@ async def test_5xx_exhausts_max_retries_and_returns_last_response() -> None:
     ("status_code", "payload"),
     [
         (400, {"code": "invalid_request", "request_id": "req-400"}),
-        (404, {"code": "link_not_found", "request_id": "req-404"}),
+        (404, {"code": "connection_not_found", "request_id": "req-404"}),
         (409, {"code": "session_already_used", "request_id": "req-409"}),
         (422, {"code": "invalid_date_range", "request_id": "req-422"}),
         (
@@ -113,7 +113,7 @@ async def test_5xx_exhausts_max_retries_and_returns_last_response() -> None:
         (
             428,
             {
-                "code": "token_required",
+                "code": "mfa_challenge_required",
                 "session": "sess-1",
                 "challenge_type": "otp_token",
                 "request_id": "req-428",
@@ -147,7 +147,7 @@ async def test_4xx_non_retryable_never_retries_and_logs_request_id(
             max_retries=5,
             sleep_fn=_make_recorder_sleeper(sleeps),
         )
-        response = await client.post("/api/v1/transactions", json={"link": "link-1"})
+        response = await client.post("/api/v1/transactions", json={"connection": "conn-1"})
 
     assert response.status_code == status_code
     assert attempts == 1
@@ -159,12 +159,12 @@ async def test_4xx_non_retryable_never_retries_and_logs_request_id(
 @pytest.mark.parametrize(
     "body_factory",
     [
-        lambda n: {"code": "too_many_sessions", "request_id": f"req-tms-{n}"},
-        lambda n: [{"code": "too_many_sessions", "request_id": f"req-tms-{n}"}],
-        lambda n: {"detail": {"code": "too_many_sessions", "request_id": f"req-tms-{n}"}},
+        lambda n: {"code": "concurrent_session_limit", "request_id": f"req-csl-{n}"},
+        lambda n: [{"code": "concurrent_session_limit", "request_id": f"req-csl-{n}"}],
+        lambda n: {"detail": {"code": "concurrent_session_limit", "request_id": f"req-csl-{n}"}},
     ],
 )
-async def test_4xx_too_many_sessions_retries_and_recovers(
+async def test_4xx_concurrent_session_limit_retries_and_recovers(
     body_factory,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -190,13 +190,13 @@ async def test_4xx_too_many_sessions_retries_and_recovers(
             max_retries=2,
             sleep_fn=_make_recorder_sleeper(sleeps),
         )
-        response = await client.post("/api/v1/accounts", json={"link": "link-1"})
+        response = await client.post("/api/v1/accounts", json={"connection": "conn-1"})
 
     assert response.status_code == 200
     assert response.json() == {"recovered": True}
     assert attempts == 2
     assert sleeps == [1.0]
-    assert "req-tms-1" in caplog.text
+    assert "req-csl-1" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -222,7 +222,7 @@ async def test_non_2xx_3xx_and_header_fallback_request_id_logged(
             max_retries=2,
             sleep_fn=_make_recorder_sleeper([]),
         )
-        response = await client.get("/api/v1/links/link-1")
+        response = await client.get("/api/v1/connections/conn-1")
 
     assert response.status_code == 302
     assert "hdr-req-302" in caplog.text
@@ -277,7 +277,7 @@ async def test_module_level_wrappers_use_shared_client_with_sleeper() -> None:
         attempts += 1
         if attempts == 1:
             return httpx.Response(503, json={"code": "upstream_unavailable", "request_id": "req-wrap-1"})
-        return httpx.Response(201, json={"id": "link-wrap"})
+        return httpx.Response(201, json={"id": "conn-wrap"})
 
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler),
@@ -286,7 +286,7 @@ async def test_module_level_wrappers_use_shared_client_with_sleeper() -> None:
         set_client(http_client)
         try:
             resp = await api_post(
-                "/api/v1/links",
+                "/api/v1/connections",
                 payload={"institution": "retail_bank_sandbox"},
                 base=2.0,
                 factor=2.0,
@@ -295,7 +295,7 @@ async def test_module_level_wrappers_use_shared_client_with_sleeper() -> None:
             )
             direct = await request_with_retry(
                 "POST",
-                "/api/v1/links",
+                "/api/v1/connections",
                 json={"institution": "retail_bank_sandbox"},
                 base=2.0,
                 factor=2.0,
@@ -323,7 +323,7 @@ async def test_retry_after_header_and_jitter_fn_applied_deterministically() -> N
             return httpx.Response(
                 429,
                 headers={"Retry-After": "5"},
-                json={"code": "too_many_sessions", "request_id": "req-ra-1"},
+                json={"code": "concurrent_session_limit", "request_id": "req-ra-1"},
             )
         if attempts == 2:
             return httpx.Response(
@@ -347,9 +347,8 @@ async def test_retry_after_header_and_jitter_fn_applied_deterministically() -> N
             max_retry_after_seconds=10.0,
             jitter_fn=lambda d: d + 0.25,
         )
-        response = await client.post("/api/v1/accounts", json={"link": "link-1"})
+        response = await client.post("/api/v1/accounts", json={"connection": "conn-1"})
 
     assert response.status_code == 200
     assert attempts == 3
     assert sleeps == [5.25, 10.25]
-

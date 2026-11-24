@@ -26,9 +26,9 @@ def api_client() -> Iterator[TestClient]:
         yield client
 
 
-def _create_link(client: TestClient, institution: str = "retail_bank_sandbox") -> str:
+def _create_connection(client: TestClient, institution: str = "retail_bank_sandbox") -> str:
     resp = client.post(
-        "/api/v1/links",
+        "/api/v1/connections",
         json={"institution": institution, "access_mode": "recurrent"},
     )
     assert resp.status_code == 201
@@ -36,13 +36,13 @@ def _create_link(client: TestClient, institution: str = "retail_bank_sandbox") -
 
 
 def test_accounts_mfa_428_to_resume_and_get(api_client: TestClient) -> None:
-    link_id = _create_link(api_client)
+    connection_id = _create_connection(api_client)
 
-    challenge_resp = api_client.post("/api/v1/accounts", json={"link": link_id})
+    challenge_resp = api_client.post("/api/v1/accounts", json={"connection": connection_id})
     assert challenge_resp.status_code == 428
     challenge = challenge_resp.json()
-    assert challenge["code"] == "token_required"
-    assert challenge["link"] == link_id
+    assert challenge["code"] == "mfa_challenge_required"
+    assert challenge["connection"] == connection_id
     assert challenge["resource"] == "accounts"
     assert challenge["challenge_type"] == "otp_token"
     assert challenge["session"]
@@ -52,7 +52,7 @@ def test_accounts_mfa_428_to_resume_and_get(api_client: TestClient) -> None:
         "/api/v1/mfa/resume",
         json={
             "session": challenge["session"],
-            "link": link_id,
+            "connection": connection_id,
             "resource": "accounts",
             "token": "654321",
         },
@@ -62,22 +62,22 @@ def test_accounts_mfa_428_to_resume_and_get(api_client: TestClient) -> None:
     assert body["status"] == "completed"
     assert body["resource"] == "accounts"
     assert len(body["data"]) == 2
-    assert body["data"][0]["link"] == link_id
+    assert body["data"][0]["connection"] == connection_id
 
-    stored = api_client.get("/api/v1/accounts", params={"link": link_id})
+    stored = api_client.get("/api/v1/accounts", params={"connection": connection_id})
     assert stored.status_code == 200
     assert len(stored.json()["data"]) == 2
 
 
 def test_transactions_mfa_428_resume_and_date_filtering(api_client: TestClient) -> None:
-    link_id = _create_link(api_client)
+    connection_id = _create_connection(api_client)
     today = date.today()
     date_from = str(today - timedelta(days=2))
     date_to = str(today)
 
     challenge_resp = api_client.post(
         "/api/v1/transactions",
-        json={"link": link_id, "date_from": date_from, "date_to": date_to},
+        json={"connection": connection_id, "date_from": date_from, "date_to": date_to},
     )
     assert challenge_resp.status_code == 428
     challenge = challenge_resp.json()
@@ -88,7 +88,7 @@ def test_transactions_mfa_428_resume_and_date_filtering(api_client: TestClient) 
         "/api/v1/mfa/resume",
         json={
             "session": challenge["session"],
-            "link": link_id,
+            "connection": connection_id,
             "resource": "transactions",
             "token": "approved",
         },
@@ -101,36 +101,38 @@ def test_transactions_mfa_428_resume_and_date_filtering(api_client: TestClient) 
     narrow_from = str(today - timedelta(days=1))
     stored = api_client.get(
         "/api/v1/transactions",
-        params={"link": link_id, "date_from": narrow_from, "date_to": date_to},
+        params={"connection": connection_id, "date_from": narrow_from, "date_to": date_to},
     )
     assert stored.status_code == 200
     assert len(stored.json()["data"]) == 2
 
 
-def test_mfa_409_on_link_mismatch_resource_mismatch_and_replay(api_client: TestClient) -> None:
-    link_a = _create_link(api_client, "bank_a")
-    link_b = _create_link(api_client, "bank_b")
+def test_mfa_409_on_connection_mismatch_resource_mismatch_and_replay(
+    api_client: TestClient,
+) -> None:
+    connection_a = _create_connection(api_client, "bank_a")
+    connection_b = _create_connection(api_client, "bank_b")
 
-    challenge = api_client.post("/api/v1/accounts", json={"link": link_a}).json()
+    challenge = api_client.post("/api/v1/accounts", json={"connection": connection_a}).json()
     session_id = challenge["session"]
 
-    wrong_link = api_client.patch(
+    wrong_connection = api_client.patch(
         "/api/v1/mfa/resume",
         json={
             "session": session_id,
-            "link": link_b,
+            "connection": connection_b,
             "resource": "accounts",
             "token": "123456",
         },
     )
-    assert wrong_link.status_code == 409
-    assert wrong_link.json()["code"] == "session_link_mismatch"
+    assert wrong_connection.status_code == 409
+    assert wrong_connection.json()["code"] == "session_connection_mismatch"
 
     wrong_resource = api_client.patch(
         "/api/v1/mfa/resume",
         json={
             "session": session_id,
-            "link": link_a,
+            "connection": connection_a,
             "resource": "transactions",
             "token": "123456",
         },
@@ -142,7 +144,7 @@ def test_mfa_409_on_link_mismatch_resource_mismatch_and_replay(api_client: TestC
         "/api/v1/mfa/resume",
         json={
             "session": session_id,
-            "link": link_a,
+            "connection": connection_a,
             "resource": "accounts",
             "token": "123456",
         },
@@ -153,7 +155,7 @@ def test_mfa_409_on_link_mismatch_resource_mismatch_and_replay(api_client: TestC
         "/api/v1/mfa/resume",
         json={
             "session": session_id,
-            "link": link_a,
+            "connection": connection_a,
             "resource": "accounts",
             "token": "123456",
         },
@@ -163,35 +165,35 @@ def test_mfa_409_on_link_mismatch_resource_mismatch_and_replay(api_client: TestC
 
 
 def test_mfa_unknown_session_and_blank_token_validation(api_client: TestClient) -> None:
-    link_id = _create_link(api_client)
+    connection_id = _create_connection(api_client)
 
     unknown = api_client.patch(
         "/api/v1/mfa/resume",
-        json={"session": "non-existent", "link": link_id, "token": "123456"},
+        json={"session": "non-existent", "connection": connection_id, "token": "123456"},
     )
     assert unknown.status_code == 400
     assert unknown.json()["code"] == "unknown_mfa_session"
 
-    challenge = api_client.post("/api/v1/accounts", json={"link": link_id}).json()
+    challenge = api_client.post("/api/v1/accounts", json={"connection": connection_id}).json()
     blank = api_client.patch(
         "/api/v1/mfa/resume",
-        json={"session": challenge["session"], "link": link_id, "token": "   "},
+        json={"session": challenge["session"], "connection": connection_id, "token": "   "},
     )
     assert blank.status_code == 422
     assert blank.json()["code"] == "invalid_mfa_token"
 
 
 def test_mfa_end_to_end_via_resilient_client_endpoints(api_client: TestClient) -> None:
-    link_resp = api_client.post(
-        "/api/v1/client/links",
+    conn_resp = api_client.post(
+        "/api/v1/client/connections",
         json={"institution": "retail_bank_sandbox"},
     )
-    assert link_resp.status_code == 201
-    link_id = link_resp.json()["id"]
+    assert conn_resp.status_code == 201
+    connection_id = conn_resp.json()["id"]
 
     challenge_resp = api_client.post(
         "/api/v1/client/accounts",
-        json={"link": link_id},
+        json={"connection": connection_id},
         headers={"X-Request-ID": "client-mfa-trace-1"},
     )
     assert challenge_resp.status_code == 428
@@ -200,26 +202,26 @@ def test_mfa_end_to_end_via_resilient_client_endpoints(api_client: TestClient) -
 
     resume_resp = api_client.patch(
         "/api/v1/client/mfa/resume",
-        json={"session": session_id, "link": link_id, "resource": "accounts", "token": "999999"},
+        json={"session": session_id, "connection": connection_id, "resource": "accounts", "token": "999999"},
     )
     assert resume_resp.status_code == 200
     assert resume_resp.json()["status"] == "completed"
 
     replay_resp = api_client.patch(
         "/api/v1/client/mfa/resume",
-        json={"session": session_id, "link": link_id, "resource": "accounts", "token": "999999"},
+        json={"session": session_id, "connection": connection_id, "resource": "accounts", "token": "999999"},
     )
     assert replay_resp.status_code == 409
     assert replay_resp.json()["code"] == "session_already_used"
 
 
 def test_mfa_resume_allows_omitted_resource_and_resolves_from_session(api_client: TestClient) -> None:
-    link_id = _create_link(api_client)
-    challenge = api_client.post("/api/v1/accounts", json={"link": link_id}).json()
+    connection_id = _create_connection(api_client)
+    challenge = api_client.post("/api/v1/accounts", json={"connection": connection_id}).json()
 
     resume_resp = api_client.patch(
         "/api/v1/mfa/resume",
-        json={"session": challenge["session"], "link": link_id, "token": "654321"},
+        json={"session": challenge["session"], "connection": connection_id, "token": "654321"},
     )
     assert resume_resp.status_code == 200
     assert resume_resp.json()["resource"] == "accounts"

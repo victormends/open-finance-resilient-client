@@ -32,3 +32,8 @@ jobs:
         env:
           PYTHONPATH: "."
         run: pytest -v
+
+      - name: Run in-process ASGITransport resilience harness
+        env:
+          PYTHONPATH: "."
+        run: python scripts/benchmark_resilience.py

@@ -10,8 +10,8 @@ from fastapi import APIRouter, Depends, Header, Query, Request, Response
 
 from backend.app.client import ResilientOpenFinanceClient, get_client
 from backend.app.sandbox import (
+    ConnectionCreateRequest,
     FaultArmRequest,
-    LinkCreateRequest,
     MfaResumeRequest,
     ResourceFetchRequest,
     SandboxAPIError,
@@ -48,43 +48,43 @@ def get_resilient_client(request: Request) -> ResilientOpenFinanceClient:
     )
 
 
-@sandbox_router.post("/links", status_code=201)
-async def create_link(
-    body: LinkCreateRequest,
+@sandbox_router.post("/connections", status_code=201)
+async def create_connection(
+    body: ConnectionCreateRequest,
     request: Request,
     x_simulate_fault: Optional[str] = Header(default=None, alias="X-Simulate-Fault"),
 ) -> Dict[str, Any]:
     request_id = get_request_id(request)
     sandbox.maybe_trigger_fault(x_simulate_fault, request_id)
-    link = sandbox.create_link(
+    connection = sandbox.create_connection(
         institution=body.institution,
         username=body.username,
         access_mode=body.access_mode,
     )
-    return {**link, "request_id": request_id}
+    return {**connection, "request_id": request_id}
 
 
-@sandbox_router.get("/links/{link_id}")
-async def get_link(
-    link_id: str,
+@sandbox_router.get("/connections/{connection_id}")
+async def get_connection(
+    connection_id: str,
     request: Request,
     x_simulate_fault: Optional[str] = Header(default=None, alias="X-Simulate-Fault"),
 ) -> Dict[str, Any]:
     request_id = get_request_id(request)
     sandbox.maybe_trigger_fault(x_simulate_fault, request_id)
-    link = sandbox.require_link(link_id)
-    return {**link, "request_id": request_id}
+    connection = sandbox.require_connection(connection_id)
+    return {**connection, "request_id": request_id}
 
 
-@sandbox_router.delete("/links/{link_id}", status_code=204)
-async def delete_link(
-    link_id: str,
+@sandbox_router.delete("/connections/{connection_id}", status_code=204)
+async def delete_connection(
+    connection_id: str,
     request: Request,
     x_simulate_fault: Optional[str] = Header(default=None, alias="X-Simulate-Fault"),
 ) -> Response:
     request_id = get_request_id(request)
     sandbox.maybe_trigger_fault(x_simulate_fault, request_id)
-    sandbox.delete_link(link_id)
+    sandbox.delete_connection(connection_id)
     return Response(status_code=204)
 
 
@@ -95,14 +95,14 @@ async def fetch_accounts(
     x_simulate_fault: Optional[str] = Header(default=None, alias="X-Simulate-Fault"),
 ) -> Dict[str, Any]:
     request_id = get_request_id(request)
-    sandbox.require_link(body.link)
+    sandbox.require_connection(body.connection)
     sandbox.maybe_trigger_fault(x_simulate_fault, request_id)
 
     require_mfa = True if body.require_mfa is None else body.require_mfa
     if require_mfa:
         challenge = sandbox.create_mfa_challenge(
             resource="accounts",
-            link=body.link,
+            connection=body.connection,
             challenge_type=body.challenge_type or "otp_token",
             context={"save_data": body.save_data},
         )
@@ -112,15 +112,15 @@ async def fetch_accounts(
             message=challenge["message"],
             extra={
                 "session": challenge["session"],
-                "link": challenge["link"],
+                "connection": challenge["connection"],
                 "resource": challenge["resource"],
                 "challenge_type": challenge["challenge_type"],
             },
         )
 
-    data = sandbox.generate_accounts(body.link, save_data=body.save_data)
+    data = sandbox.generate_accounts(body.connection, save_data=body.save_data)
     return {
-        "link": body.link,
+        "connection": body.connection,
         "resource": "accounts",
         "request_id": request_id,
         "data": data,
@@ -130,17 +130,17 @@ async def fetch_accounts(
 @sandbox_router.get("/accounts")
 async def get_accounts(
     request: Request,
-    link: str = Query(...),
+    connection: str = Query(...),
     x_simulate_fault: Optional[str] = Header(default=None, alias="X-Simulate-Fault"),
 ) -> Dict[str, Any]:
     request_id = get_request_id(request)
-    sandbox.require_link(link)
+    sandbox.require_connection(connection)
     sandbox.maybe_trigger_fault(x_simulate_fault, request_id)
     return {
-        "link": link,
+        "connection": connection,
         "resource": "accounts",
         "request_id": request_id,
-        "data": sandbox.accounts.get(link, []),
+        "data": sandbox.accounts.get(connection, []),
     }
 
 
@@ -151,14 +151,14 @@ async def fetch_owners(
     x_simulate_fault: Optional[str] = Header(default=None, alias="X-Simulate-Fault"),
 ) -> Dict[str, Any]:
     request_id = get_request_id(request)
-    sandbox.require_link(body.link)
+    sandbox.require_connection(body.connection)
     sandbox.maybe_trigger_fault(x_simulate_fault, request_id)
 
     require_mfa = False if body.require_mfa is None else body.require_mfa
     if require_mfa:
         challenge = sandbox.create_mfa_challenge(
             resource="owners",
-            link=body.link,
+            connection=body.connection,
             challenge_type=body.challenge_type or "otp_token",
             context={"save_data": body.save_data},
         )
@@ -168,15 +168,15 @@ async def fetch_owners(
             message=challenge["message"],
             extra={
                 "session": challenge["session"],
-                "link": challenge["link"],
+                "connection": challenge["connection"],
                 "resource": challenge["resource"],
                 "challenge_type": challenge["challenge_type"],
             },
         )
 
-    data = sandbox.generate_owners(body.link, save_data=body.save_data)
+    data = sandbox.generate_owners(body.connection, save_data=body.save_data)
     return {
-        "link": body.link,
+        "connection": body.connection,
         "resource": "owners",
         "request_id": request_id,
         "data": data,
@@ -186,17 +186,17 @@ async def fetch_owners(
 @sandbox_router.get("/owners")
 async def get_owners(
     request: Request,
-    link: str = Query(...),
+    connection: str = Query(...),
     x_simulate_fault: Optional[str] = Header(default=None, alias="X-Simulate-Fault"),
 ) -> Dict[str, Any]:
     request_id = get_request_id(request)
-    sandbox.require_link(link)
+    sandbox.require_connection(connection)
     sandbox.maybe_trigger_fault(x_simulate_fault, request_id)
     return {
-        "link": link,
+        "connection": connection,
         "resource": "owners",
         "request_id": request_id,
-        "data": sandbox.owners.get(link, []),
+        "data": sandbox.owners.get(connection, []),
     }
 
 
@@ -207,7 +207,7 @@ async def fetch_transactions(
     x_simulate_fault: Optional[str] = Header(default=None, alias="X-Simulate-Fault"),
 ) -> Dict[str, Any]:
     request_id = get_request_id(request)
-    sandbox.require_link(body.link)
+    sandbox.require_connection(body.connection)
     sandbox.parse_date_range(body.date_from, body.date_to)
     sandbox.maybe_trigger_fault(x_simulate_fault, request_id)
 
@@ -215,7 +215,7 @@ async def fetch_transactions(
     if require_mfa:
         challenge = sandbox.create_mfa_challenge(
             resource="transactions",
-            link=body.link,
+            connection=body.connection,
             challenge_type=body.challenge_type or "app_approval",
             context={
                 "date_from": body.date_from,
@@ -229,20 +229,20 @@ async def fetch_transactions(
             message=challenge["message"],
             extra={
                 "session": challenge["session"],
-                "link": challenge["link"],
+                "connection": challenge["connection"],
                 "resource": challenge["resource"],
                 "challenge_type": challenge["challenge_type"],
             },
         )
 
     data = sandbox.generate_transactions(
-        link=body.link,
+        connection=body.connection,
         date_from=body.date_from,
         date_to=body.date_to,
         save_data=body.save_data,
     )
     return {
-        "link": body.link,
+        "connection": body.connection,
         "resource": "transactions",
         "request_id": request_id,
         "data": data,
@@ -252,16 +252,20 @@ async def fetch_transactions(
 @sandbox_router.get("/transactions")
 async def get_transactions(
     request: Request,
-    link: str = Query(...),
+    connection: str = Query(...),
     date_from: str = Query(...),
     date_to: str = Query(...),
     x_simulate_fault: Optional[str] = Header(default=None, alias="X-Simulate-Fault"),
 ) -> Dict[str, Any]:
     request_id = get_request_id(request)
     sandbox.maybe_trigger_fault(x_simulate_fault, request_id)
-    rows = sandbox.filter_stored_transactions(link=link, date_from=date_from, date_to=date_to)
+    rows = sandbox.filter_stored_transactions(
+        connection=connection,
+        date_from=date_from,
+        date_to=date_to,
+    )
     return {
-        "link": link,
+        "connection": connection,
         "resource": "transactions",
         "request_id": request_id,
         "data": rows,
@@ -278,7 +282,7 @@ async def resume_mfa(
     sandbox.maybe_trigger_fault(x_simulate_fault, request_id)
     result = sandbox.resume_mfa(
         session=body.session,
-        link=body.link,
+        connection=body.connection,
         token=body.token,
         resource=body.resource,
     )
@@ -343,36 +347,36 @@ async def _forward_via_resilient_client(
     )
 
 
-@client_router.post("/links")
-async def client_create_link(
-    body: LinkCreateRequest,
+@client_router.post("/connections")
+async def client_create_connection(
+    body: ConnectionCreateRequest,
     request: Request,
     resilient: ResilientOpenFinanceClient = Depends(get_resilient_client),
 ) -> Response:
     return await _forward_via_resilient_client(
-        request, resilient, "POST", "/api/v1/links", payload=body.model_dump()
+        request, resilient, "POST", "/api/v1/connections", payload=body.model_dump()
     )
 
 
-@client_router.get("/links/{link_id}")
-async def client_get_link(
-    link_id: str,
+@client_router.get("/connections/{connection_id}")
+async def client_get_connection(
+    connection_id: str,
     request: Request,
     resilient: ResilientOpenFinanceClient = Depends(get_resilient_client),
 ) -> Response:
     return await _forward_via_resilient_client(
-        request, resilient, "GET", f"/api/v1/links/{link_id}"
+        request, resilient, "GET", f"/api/v1/connections/{connection_id}"
     )
 
 
-@client_router.delete("/links/{link_id}")
-async def client_delete_link(
-    link_id: str,
+@client_router.delete("/connections/{connection_id}")
+async def client_delete_connection(
+    connection_id: str,
     request: Request,
     resilient: ResilientOpenFinanceClient = Depends(get_resilient_client),
 ) -> Response:
     return await _forward_via_resilient_client(
-        request, resilient, "DELETE", f"/api/v1/links/{link_id}"
+        request, resilient, "DELETE", f"/api/v1/connections/{connection_id}"
     )
 
 
@@ -412,7 +416,7 @@ async def client_fetch_transactions(
 @client_router.get("/transactions")
 async def client_get_transactions(
     request: Request,
-    link: str = Query(...),
+    connection: str = Query(...),
     date_from: str = Query(...),
     date_to: str = Query(...),
     resilient: ResilientOpenFinanceClient = Depends(get_resilient_client),
@@ -422,7 +426,7 @@ async def client_get_transactions(
         resilient,
         "GET",
         "/api/v1/transactions",
-        params={"link": link, "date_from": date_from, "date_to": date_to},
+        params={"connection": connection, "date_from": date_from, "date_to": date_to},
     )
 
 

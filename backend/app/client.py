@@ -154,11 +154,11 @@ def parse_retry_after_seconds(
 
 
 def should_retry(response: httpx.Response) -> bool:
-    """Retry on 5xx responses, and on 4xx ONLY when code == 'too_many_sessions'."""
+    """Retry on 5xx responses, and on 4xx ONLY when code == 'concurrent_session_limit'."""
     if response.status_code >= 500:
         return True
     if 400 <= response.status_code < 500:
-        return "too_many_sessions" in extract_error_codes(response)
+        return "concurrent_session_limit" in extract_error_codes(response)
     return False
 
 

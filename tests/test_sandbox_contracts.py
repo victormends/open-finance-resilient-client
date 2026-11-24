@@ -1,4 +1,4 @@
-"""Contract tests for sandbox date validation, link lifecycle, probes, and fault injection."""
+"""Contract tests for sandbox date validation, connection lifecycle, probes, and fault injection."""
 
 from __future__ import annotations
 
@@ -64,47 +64,47 @@ def test_request_id_propagation_on_success_and_error() -> None:
 
         err_resp = client.post(
             "/api/v1/accounts",
-            json={"link": "missing-link"},
+            json={"connection": "missing-connection"},
             headers={"X-Request-ID": "trace-err-404"},
         )
         assert err_resp.status_code == 404
         assert err_resp.headers["X-Request-ID"] == "trace-err-404"
         assert err_resp.json()["request_id"] == "trace-err-404"
-        assert err_resp.json()["code"] == "link_not_found"
+        assert err_resp.json()["code"] == "connection_not_found"
 
 
-def test_link_lifecycle_and_cascade_cleanup() -> None:
+def test_connection_lifecycle_and_cascade_cleanup() -> None:
     app = create_app(retry_base=0.0)
     with TestClient(app) as client:
         create_resp = client.post(
-            "/api/v1/links",
+            "/api/v1/connections",
             json={"institution": "retail_bank_sandbox", "username": "u_test"},
         )
         assert create_resp.status_code == 201
-        link_id = create_resp.json()["id"]
+        connection_id = create_resp.json()["id"]
 
-        get_resp = client.get(f"/api/v1/links/{link_id}")
+        get_resp = client.get(f"/api/v1/connections/{connection_id}")
         assert get_resp.status_code == 200
         assert get_resp.json()["institution"] == "retail_bank_sandbox"
 
-        owners_resp = client.post("/api/v1/owners", json={"link": link_id})
+        owners_resp = client.post("/api/v1/owners", json={"connection": connection_id})
         assert owners_resp.status_code == 200
-        assert owners_resp.json()["data"][0]["link"] == link_id
+        assert owners_resp.json()["data"][0]["connection"] == connection_id
 
-        mfa_resp = client.post("/api/v1/accounts", json={"link": link_id})
+        mfa_resp = client.post("/api/v1/accounts", json={"connection": connection_id})
         assert mfa_resp.status_code == 428
         session_id = mfa_resp.json()["session"]
 
-        del_resp = client.delete(f"/api/v1/links/{link_id}")
+        del_resp = client.delete(f"/api/v1/connections/{connection_id}")
         assert del_resp.status_code == 204
 
-        assert client.get(f"/api/v1/links/{link_id}").status_code == 404
-        assert client.post("/api/v1/owners", json={"link": link_id}).status_code == 404
-        assert client.delete(f"/api/v1/links/{link_id}").status_code == 404
+        assert client.get(f"/api/v1/connections/{connection_id}").status_code == 404
+        assert client.post("/api/v1/owners", json={"connection": connection_id}).status_code == 404
+        assert client.delete(f"/api/v1/connections/{connection_id}").status_code == 404
 
         stale_resume = client.patch(
             "/api/v1/mfa/resume",
-            json={"session": session_id, "link": link_id, "token": "123456"},
+            json={"session": session_id, "connection": connection_id, "token": "123456"},
         )
         assert stale_resume.status_code == 400
         assert stale_resume.json()["code"] == "unknown_mfa_session"
@@ -126,21 +126,21 @@ def test_transactions_date_validation(
 ) -> None:
     app = create_app(retry_base=0.0)
     with TestClient(app) as client:
-        link_id = client.post(
-            "/api/v1/links",
+        connection_id = client.post(
+            "/api/v1/connections",
             json={"institution": "retail_bank_sandbox"},
         ).json()["id"]
 
         post_resp = client.post(
             "/api/v1/transactions",
-            json={"link": link_id, "date_from": date_from, "date_to": date_to},
+            json={"connection": connection_id, "date_from": date_from, "date_to": date_to},
         )
         assert post_resp.status_code == 422
         assert post_resp.json()["code"] == expected_code
 
         get_resp = client.get(
             "/api/v1/transactions",
-            params={"link": link_id, "date_from": date_from, "date_to": date_to},
+            params={"connection": connection_id, "date_from": date_from, "date_to": date_to},
         )
         assert get_resp.status_code == 422
         assert get_resp.json()["code"] == expected_code
@@ -156,15 +156,15 @@ def test_fault_injection_end_to_end_resilience(caplog: pytest.LogCaptureFixture)
     caplog.set_level(logging.ERROR, logger="backend.app.client")
 
     with TestClient(app) as client:
-        link_id = client.post(
-            "/api/v1/links",
+        connection_id = client.post(
+            "/api/v1/connections",
             json={"institution": "retail_bank_sandbox"},
         ).json()["id"]
 
         # 503-once via header recovers transparently on retry
         resp_503 = client.post(
             "/api/v1/client/owners",
-            json={"link": link_id},
+            json={"connection": connection_id},
             headers={"X-Simulate-Fault": "503-once", "X-Request-ID": "e2e-503-trace"},
         )
         assert resp_503.status_code == 200
@@ -172,22 +172,25 @@ def test_fault_injection_end_to_end_resilience(caplog: pytest.LogCaptureFixture)
         assert sleeps == [1.0]
         assert "e2e-503-trace" in caplog.text
 
-        # too_many_sessions-once via header recovers transparently on retry
+        # concurrent_session_limit-once via header recovers transparently on retry
         sleeps.clear()
-        resp_tms = client.post(
+        resp_csl = client.post(
             "/api/v1/client/owners",
-            json={"link": link_id},
-            headers={"X-Simulate-Fault": "too_many_sessions-once", "X-Request-ID": "e2e-tms-trace"},
+            json={"connection": connection_id},
+            headers={
+                "X-Simulate-Fault": "concurrent_session_limit-once",
+                "X-Request-ID": "e2e-csl-trace",
+            },
         )
-        assert resp_tms.status_code == 200
+        assert resp_csl.status_code == 200
         assert sleeps == [1.0]
-        assert "e2e-tms-trace" in caplog.text
+        assert "e2e-csl-trace" in caplog.text
 
         # 423 operational_limits_reached is NOT retried and returns 423 immediately
         sleeps.clear()
         resp_423 = client.post(
             "/api/v1/client/owners",
-            json={"link": link_id},
+            json={"connection": connection_id},
             headers={"X-Simulate-Fault": "423", "X-Request-ID": "e2e-423-trace"},
         )
         assert resp_423.status_code == 423
@@ -205,8 +208,8 @@ def test_fault_arming_endpoint_and_clear() -> None:
 
     app = create_app(retry_base=0.5, retry_factor=2.0, max_retries=2, sleep_fn=zero_sleep)
     with TestClient(app) as client:
-        link_id = client.post(
-            "/api/v1/links",
+        connection_id = client.post(
+            "/api/v1/connections",
             json={"institution": "retail_bank_sandbox"},
         ).json()["id"]
 
@@ -214,16 +217,16 @@ def test_fault_arming_endpoint_and_clear() -> None:
         assert arm.status_code == 200
         assert arm.json()["armed"] == {"fault": "503-once", "remaining": 1}
 
-        recovered = client.post("/api/v1/client/owners", json={"link": link_id})
+        recovered = client.post("/api/v1/client/owners", json={"connection": connection_id})
         assert recovered.status_code == 200
         assert sleeps == [0.5]
 
         # Persistent 423 armed then cleared
         client.post("/api/v1/sandbox/faults", json={"fault": "423"})
-        blocked = client.post("/api/v1/client/owners", json={"link": link_id})
+        blocked = client.post("/api/v1/client/owners", json={"connection": connection_id})
         assert blocked.status_code == 423
 
         cleared = client.delete("/api/v1/sandbox/faults")
         assert cleared.status_code == 204
-        ok_after = client.post("/api/v1/client/owners", json={"link": link_id})
+        ok_after = client.post("/api/v1/client/owners", json={"connection": connection_id})
         assert ok_after.status_code == 200
