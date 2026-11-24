@@ -14,7 +14,7 @@ Switching solely on HTTP status codes breaks down when upstream providers overlo
 | `404` | `connection_not_found` | Connection was never created or was deleted | **No** | Prompt user to re-create consent via `POST /api/v1/connections`. |
 | `409` | `session_connection_mismatch`, `session_resource_mismatch`, `session_already_used` | Strict state-machine invariant violation or replay attempt | **No** | Do not retry with old `session`. Re-initiate resource `POST` if fresh data is needed. |
 | `422` | `validation_error`, `invalid_date_format`, `invalid_date_range`, `invalid_mfa_token` | Schema error, non-`YYYY-MM-DD` date, `date_from > date_to`, or blank MFA token | **No** | Correct request parameters before re-issuing. |
-| `423` | `operational_limits_reached` (`public_error_code`) | Regulatory or institution operational quota exhausted | **No** | Do **not** blindly retry. Surface quota state, defer next sync until window reset, and track `request_id`. |
+| `423` | `account_quota_locked` (`public_error_code`) | Regulatory or institution operational quota exhausted | **No** | Do **not** blindly retry. Surface quota state, defer next sync until window reset, and track `request_id`. |
 | `428` | `mfa_challenge_required` | Institution requires interactive multi-factor authentication | **No** | Pause sync, collect MFA factor (`challenge_type`), and call `PATCH /api/v1/mfa/resume`. |
 | `429` | `concurrent_session_limit` | Temporary concurrency ceiling on upstream institution sessions | **Yes** | Automatically retried with exponential backoff (`base * factor^attempt`). |
 | `429` | `rate_limit_exceeded` | Sustained API throughput limit without session-slot semantics | **No** (strict policy) | Respect downstream rate budgets / queue externally rather than tight-looping. |
@@ -34,7 +34,7 @@ In real-world Open Finance integrations, operational quota exhaustion frequently
 If an integration switches strictly on `status_code == 429` to trigger backoff or `status_code == 400` to raise an alert, `423 Locked` falls into an unhandled fallback branch, producing silent data gaps or infinite naive retries against a hard quota ceiling.
 
 ### Contract Rule Implemented Here
-- **Detect operational quotas by structured `code` / `public_error_code` (`operational_limits_reached`)**, not by status code guesswork.
+- **Detect operational quotas by structured `code` / `public_error_code` (`account_quota_locked`)**, not by status code guesswork.
 - **Keep `4xx` non-retryable by default**, carving out a **single explicit allowlist rule** (`code == "concurrent_session_limit"`) for transient concurrency slots.
 - **Log `request_id` on every non-2xx response** regardless of whether the request will be retried or surfaced to the caller.
 
@@ -85,12 +85,12 @@ POST /api/v1/accounts  (or /api/v1/transactions)
 ### Step 1: Correlate by `request_id`
 Every non-2xx client call logs:
 ```text
-ERROR backend.app.client - Open Finance non-2xx response: status=423 method=POST path=/api/v1/owners request_id=<uuid> code=operational_limits_reached
+ERROR backend.app.client - Open Finance non-2xx response: status=423 method=POST path=/api/v1/owners request_id=<uuid> code=account_quota_locked
 ```
 Search centralized logs by `request_id` (and verify the matching `X-Request-ID` HTTP response header) to reconstruct the full retry timeline:
 - **Multiple attempts sharing the same `request_id` ending in `200`:** Transient `5xx` or `concurrent_session_limit` self-healed via exponential backoff. No incident action unless error rate breaches SLO.
 - **Multiple attempts ending in `503` after `max_retries`:** Sustained upstream connector outage. Escalate with the final `request_id` and timestamp.
-- **Single attempt ending in `423`:** Operational quota reached (`operational_limits_reached`). Do **not** increase retry count; verify institution quota schedule.
+- **Single attempt ending in `423`:** Operational quota reached (`account_quota_locked`). Do **not** increase retry count; verify institution quota schedule.
 
 ### Step 2: Recovering Stuck or Failed MFA (`428` / `409` / `400`)
 1. **User abandoned or token expired (`400 unknown_mfa_session`):** Do not retry `PATCH /api/v1/mfa/resume`. Trigger a fresh `POST /api/v1/{resource}` to issue a new `session` UUID.

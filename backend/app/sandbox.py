@@ -154,9 +154,9 @@ class OpenFinanceSandbox:
         if base_fault == "423":
             raise SandboxAPIError(
                 status_code=423,
-                code="operational_limits_reached",
+                code="account_quota_locked",
                 message="Operational retrieval quota reached for this connection.",
-                extra={"public_error_code": "operational_limits_reached"},
+                extra={"public_error_code": "account_quota_locked"},
             )
         if base_fault == "429":
             raise SandboxAPIError(

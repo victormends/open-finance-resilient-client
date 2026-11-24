@@ -105,8 +105,8 @@ async def test_5xx_exhausts_max_retries_and_returns_last_response() -> None:
         (
             423,
             {
-                "code": "operational_limits_reached",
-                "public_error_code": "operational_limits_reached",
+                "code": "account_quota_locked",
+                "public_error_code": "account_quota_locked",
                 "request_id": "req-423",
             },
         ),

@@ -186,7 +186,7 @@ curl -i -X POST http://127.0.0.1:8000/api/v1/client/owners \
   -H "X-Simulate-Fault: concurrent_session_limit-once" \
   -d "{\"connection\": \"$CONNECTION_ID\"}"
 
-# Operational quota lock (423 operational_limits_reached) is NOT retried
+# Operational quota lock (423 account_quota_locked) is NOT retried
 curl -i -X POST http://127.0.0.1:8000/api/v1/client/owners \
   -H "Content-Type: application/json" \
   -H "X-Simulate-Fault: 423" \

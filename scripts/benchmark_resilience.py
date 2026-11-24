@@ -111,7 +111,7 @@ async def run_benchmark() -> Dict[str, Any]:
                 }
             )
 
-            # 3. Non-retry boundary (429 rate_limit_exceeded, 423 operational_limits_reached, 428 mfa_challenge_required)
+            # 3. Non-retry boundary (429 rate_limit_exceeded, 423 account_quota_locked, 428 mfa_challenge_required)
             sleeps.clear()
             t0 = time.perf_counter()
             r429 = await client.post(
@@ -135,7 +135,7 @@ async def run_benchmark() -> Dict[str, Any]:
                 and r429.json().get("code") == "rate_limit_exceeded"
                 and r429.json().get("request_id") == "bench-429"
                 and r423.status_code == 423
-                and r423.json().get("code") == "operational_limits_reached"
+                and r423.json().get("code") == "account_quota_locked"
                 and r423.json().get("request_id") == "bench-423"
                 and r428.status_code == 428
                 and r428.json().get("code") == "mfa_challenge_required"

@@ -186,7 +186,7 @@ def test_fault_injection_end_to_end_resilience(caplog: pytest.LogCaptureFixture)
         assert sleeps == [1.0]
         assert "e2e-csl-trace" in caplog.text
 
-        # 423 operational_limits_reached is NOT retried and returns 423 immediately
+        # 423 account_quota_locked is NOT retried and returns 423 immediately
         sleeps.clear()
         resp_423 = client.post(
             "/api/v1/client/owners",
@@ -194,8 +194,8 @@ def test_fault_injection_end_to_end_resilience(caplog: pytest.LogCaptureFixture)
             headers={"X-Simulate-Fault": "423", "X-Request-ID": "e2e-423-trace"},
         )
         assert resp_423.status_code == 423
-        assert resp_423.json()["code"] == "operational_limits_reached"
-        assert resp_423.json()["public_error_code"] == "operational_limits_reached"
+        assert resp_423.json()["code"] == "account_quota_locked"
+        assert resp_423.json()["public_error_code"] == "account_quota_locked"
         assert sleeps == []
         assert "e2e-423-trace" in caplog.text
 
