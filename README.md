@@ -1,8 +1,28 @@
-# Open Finance Resilient Client
+# open-finance-resilient-client
 
-Reference implementation of an **async Open Finance HTTP client**, **lifespan-managed FastAPI service**, **fault-injectable in-process sandbox**, and **HTTP `428 Precondition Required` MFA state machine**.
+An async FastAPI + `httpx` client and local fault-injectable sandbox encoding selective retry boundaries, `request_id` correlation logging, and an HTTP `428 Precondition Required` MFA state machine.
 
-Built to demonstrate production-grade resilience patterns for financial aggregation APIs: selective backoff on transient capacity errors, strict non-retry boundaries on quota/client errors, `request_id` correlation across every non-2xx path, and deterministic multi-step institution authentication recovery.
+---
+
+## Why This Exists
+
+Open Finance and banking aggregation APIs rarely fail cleanly with plain `200` or `500` responses:
+
+1. An endpoint returns `HTTP 428 Precondition Required` with a multi-step MFA challenge bound strictly to one `(session, link, resource)` tuple, returning `409 Conflict` if replayed or resumed out of scope.
+2. Both transient concurrency caps (`code == "too_many_sessions"`) and hard rate limits can surface as `429` or `4xx` - retrying the wrong one wastes quota, while failing to retry `too_many_sessions` drops recoverable syncs.
+3. Without end-to-end `request_id` propagation across middleware, upstream error bodies, and client logs, triaging failed customer syncs slows down significantly.
+
+Testing these error transitions directly against external sandboxes is slow and non-deterministic, so this repository pairs a lifecycle-managed async `httpx` client with an in-process Open Finance sandbox supporting controllable fault injection (`X-Simulate-Fault`).
+
+## Scope & Intentional Non-Goals
+
+This repository is a **standalone reference implementation and test harness** derived from real financial API integration edge cases and cleaned of vendor-specific branding and credentials.
+
+It is **not**:
+
+- a production banking connector or certified FAPI/Open Finance client
+- backed by PostgreSQL or Redis (sandbox state lives in process memory per app instance)
+- wired for real OAuth2/mTLS certificates or external credential vaults
 
 ---
 
@@ -10,23 +30,23 @@ Built to demonstrate production-grade resilience patterns for financial aggregat
 
 ```text
 Caller / Integration
-   │
-   ▼  (X-Request-ID middleware generates or propagates correlation ID)
+   |
+   v  (X-Request-ID middleware generates or propagates correlation ID)
 FastAPI Entrypoint (backend/app/main.py)
-   ├── /health, /ready
-   ├── /api/v1/client/* ──▶ ResilientOpenFinanceClient (backend/app/client.py)
-   │                             ├── Shared httpx.AsyncClient (FastAPI lifespan)
-   │                             ├── Exponential backoff (base * factor^attempt)
-   │                             ├── Retries: 5xx + 4xx ONLY if code == "too_many_sessions"
-   │                             └── Logs request_id on every non-2xx response
-   │                                    │
-   │                                    ▼  (ASGITransport in-process or external HTTP)
-   └── /api/v1/*        ──▶ Deterministic Sandbox (backend/app/sandbox.py)
-                                 ├── Links CRUD (/api/v1/links)
-                                 ├── Resources (/accounts, /owners, /transactions)
-                                 ├── HTTP 428 MFA State Machine -> PATCH /api/v1/mfa/resume
-                                 ├── Strict (session, link, resource) binding -> 409 Conflict
-                                 └── Fault injection (X-Simulate-Fault / /api/v1/sandbox/faults)
+   |-- /health, /ready
+   |-- /api/v1/client/* --> ResilientOpenFinanceClient (backend/app/client.py)
+   |                          |-- App-scoped httpx.AsyncClient (FastAPI lifespan)
+   |                          |-- Exponential backoff (base * factor^attempt) + Retry-After + optional jitter
+   |                          |-- Retries: 5xx + 4xx ONLY if code == "too_many_sessions"
+   |                          +-- Logs request_id on every non-2xx response
+   |                                 |
+   |                                 v  (ASGITransport in-process or external HTTP)
+   +-- /api/v1/*        --> Deterministic Sandbox (backend/app/sandbox.py)
+                              |-- Links CRUD (/api/v1/links)
+                              |-- Resources (/accounts, /owners, /transactions)
+                              |-- HTTP 428 MFA State Machine -> PATCH /api/v1/mfa/resume
+                              |-- Strict (session, link, resource) binding -> 409 Conflict
+                              +-- Fault injection (X-Simulate-Fault / /api/v1/sandbox/faults)
 ```
 
 ---
@@ -34,18 +54,18 @@ FastAPI Entrypoint (backend/app/main.py)
 ## Core Engineering Guarantees
 
 1. **App-Scoped Lifespan-Managed `httpx.AsyncClient`**
-   FastAPI's `lifespan` initializes an isolated per-app async connection pool on startup (flipping `/ready` from `503 not_ready` to `200 ready`) and closes it cleanly on shutdown without per-request socket churn or cross-app state clobbering.
+   FastAPI's `lifespan` initializes an isolated per-app async connection pool on startup (switching `/ready` from `503 not_ready` to `200 ready`) and closes it cleanly on shutdown without per-request socket churn or cross-app state interference.
 2. **Selective Exponential Backoff, `Retry-After` & Optional Jitter (`base`, `factor`, `max_retries`, `sleep_fn`, `jitter_fn`)**
-   - **Retried:** Transport errors (`httpx.RequestError`), all `5xx` responses, and `4xx` responses **exclusively** when the structured error payload carries `code == "too_many_sessions"`. Honors numeric `Retry-After` headers (bounded by `max_retry_after_seconds`) and optional caller-injected `jitter_fn`.
+   - **Retried:** Transport errors (`httpx.RequestError`), all `5xx` responses, and `4xx` responses exclusively when the structured error payload carries `code == "too_many_sessions"`. Honors numeric `Retry-After` headers (bounded by `max_retry_after_seconds`) and optional caller-injected `jitter_fn`.
    - **Never retried:** `400`, `404`, `409`, `422`, `423`, `428`, or generic `429` (`rate_limit_exceeded`).
-   - **Deterministic testing:** Injectable async `sleep_fn` allows tests to assert exact backoff schedules (`base * factor^attempt`) in zero wall-clock time.
+   - **Deterministic testing:** Injectable async `sleep_fn` allows tests to assert exact backoff schedules without waiting real wall-clock seconds.
 3. **End-to-End `request_id` Observability**
-   HTTP middleware extracts or generates `X-Request-ID`, attaches it to every JSON error body and response header, forwards it through the resilient proxy client, and logs `status`, `method`, `path`, `code`, and `request_id` on every non-2xx upstream response.
+   HTTP middleware extracts or generates `X-Request-ID`, attaches it to every JSON error body and response header, forwards it through the resilient proxy client, and logs `status`, `method`, `path`, `code`, and `request_id` on every non-2xx response.
 4. **Strict HTTP `428` MFA State Machine**
    - `POST /api/v1/accounts` and `POST /api/v1/transactions` emit `HTTP 428 Precondition Required` with a fresh `session` UUID and `challenge_type` (`otp_token` or `app_approval`).
    - `PATCH /api/v1/mfa/resume` enforces strict binding across `(session, link, resource)` and one-time consumption, returning `409 Conflict` on link mismatch, resource mismatch, or replay.
 5. **Controlled End-to-End Fault Injection**
-   Send `X-Simulate-Fault` (`503-once`, `too_many_sessions-once`, `423`, `429`, `400`) or queue faults via `POST /api/v1/sandbox/faults` to observe real retry recovery and non-retry boundaries through `/api/v1/client/*`.
+   Send `X-Simulate-Fault` (`503-once`, `too_many_sessions-once`, `423`, `429`, `400`) or queue faults via `POST /api/v1/sandbox/faults` to inspect recovery and non-retry behavior through `/api/v1/client/*`.
 
 ---
 
@@ -99,13 +119,11 @@ docker compose up --build
 ### 1. Create a Link & Trigger HTTP `428` MFA
 
 ```bash
-# Create a sandbox link
 LINK_ID=$(curl -s -X POST http://127.0.0.1:8000/api/v1/links \
   -H "Content-Type: application/json" \
   -d '{"institution": "retail_bank_sandbox", "access_mode": "recurrent"}' \
   | python -c "import sys, json; print(json.load(sys.stdin)['id'])")
 
-# Initiate accounts sync -> returns HTTP 428 Precondition Required
 curl -i -X POST http://127.0.0.1:8000/api/v1/accounts \
   -H "Content-Type: application/json" \
   -d "{\"link\": \"$LINK_ID\"}"
@@ -125,24 +143,22 @@ Example `428` response:
 }
 ```
 
-### 2. Resume MFA (`PATCH /api/v1/mfa/resume`) & Observe Replay Protection (`409`)
+### 2. Resume MFA (`PATCH /api/v1/mfa/resume`) & Verify Replay Rejection (`409`)
 
 ```bash
-# Resume challenge with valid session/link/resource -> returns 200 OK + account payload
 curl -s -X PATCH http://127.0.0.1:8000/api/v1/mfa/resume \
   -H "Content-Type: application/json" \
   -d "{\"session\": \"<SESSION_UUID>\", \"link\": \"$LINK_ID\", \"resource\": \"accounts\", \"token\": \"123456\"}"
 
-# Replaying the same session immediately returns 409 Conflict (session_already_used)
 curl -i -X PATCH http://127.0.0.1:8000/api/v1/mfa/resume \
   -H "Content-Type: application/json" \
   -d "{\"session\": \"<SESSION_UUID>\", \"link\": \"$LINK_ID\", \"resource\": \"accounts\", \"token\": \"123456\"}"
 ```
 
-### 3. Demonstrate Resilient Recovery vs Non-Retry Boundary
+### 3. Exercise Resilient Recovery vs Non-Retry Boundary
 
 ```bash
-# Transient 503 on attempt 0 is automatically retried and succeeds (200 OK)
+# Transient 503 on attempt 0 is retried and succeeds (200 OK)
 curl -i -X POST http://127.0.0.1:8000/api/v1/client/owners \
   -H "Content-Type: application/json" \
   -H "X-Simulate-Fault: 503-once" \
@@ -154,14 +170,12 @@ curl -i -X POST http://127.0.0.1:8000/api/v1/client/owners \
   -H "X-Simulate-Fault: too_many_sessions-once" \
   -d "{\"link\": \"$LINK_ID\"}"
 
-# Operational quota lock (423 operational_limits_reached) is NOT retried and returns 423 immediately
+# Operational quota lock (423 operational_limits_reached) is NOT retried
 curl -i -X POST http://127.0.0.1:8000/api/v1/client/owners \
   -H "Content-Type: application/json" \
   -H "X-Simulate-Fault: 423" \
   -d "{\"link\": \"$LINK_ID\"}"
 ```
-
----
 
 ## Documentation
 
@@ -169,4 +183,4 @@ curl -i -X POST http://127.0.0.1:8000/api/v1/client/owners \
 
 ## License
 
-[MIT](LICENSE)
+MIT - see [LICENSE](LICENSE).
